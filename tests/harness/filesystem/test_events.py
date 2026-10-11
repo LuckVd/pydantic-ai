@@ -8,6 +8,7 @@ import os
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import anyio.to_thread
@@ -15,6 +16,7 @@ import pytest
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     AgentStreamEvent,
     FunctionToolResultEvent,
@@ -24,6 +26,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai_harness._events import event_ctx
 from pydantic_ai_harness.filesystem import (
     MAX_DIFF_SOURCE_CHARS,
     MAX_EVENT_DIFF_CHARS,
@@ -441,6 +444,41 @@ class TestFileSystemEvents:
                 tool_name='read_file',
             )
         ]
+
+    def test_event_ctx_resolves_prefixed_names_by_original(self) -> None:
+        """The rename scan skips non-matching tools and maps `{prefix}_{original}` back (#9879)."""
+        read_tool = SimpleNamespace(
+            toolset=SimpleNamespace(prefix='wiki'),
+            tool_def=SimpleNamespace(name='wiki_read_file', capability_id='file_system'),
+        )
+        list_tool = SimpleNamespace(
+            toolset=SimpleNamespace(prefix='wiki'),
+            tool_def=SimpleNamespace(name='wiki_list_directory', capability_id='file_system'),
+        )
+        ctx = SimpleNamespace(
+            tool_manager=SimpleNamespace(tools={'wiki_list_directory': list_tool, 'wiki_read_file': read_tool}),
+            tool_name='read_file',
+            _capability=None,
+            capabilities={'file_system': object()},
+        )
+
+        assert event_ctx(ctx, 'FileSystem') is ctx  # type: ignore[arg-type]
+
+    def test_event_ctx_still_refuses_unresolvable_renames(self) -> None:
+        """A renamed tool the scan cannot map back keeps the bare-toolset refusal (#9879)."""
+        read_tool = SimpleNamespace(
+            toolset=SimpleNamespace(prefix='wiki'),
+            tool_def=SimpleNamespace(name='wiki_read_file', capability_id='file_system'),
+        )
+        ctx = SimpleNamespace(
+            tool_manager=SimpleNamespace(tools={'wiki_read_file': read_tool}),
+            tool_name='search_file',
+            _capability=None,
+            capabilities={'file_system': object()},
+        )
+
+        with pytest.raises(UserError, match='emits capability events'):
+            event_ctx(ctx, 'FileSystem')  # type: ignore[arg-type]
 
 
 class TestFileChangeRequests:
